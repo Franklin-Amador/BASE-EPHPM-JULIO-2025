@@ -1,0 +1,1 @@
+ymophg_mean,ymophg_median,anosest_mean,edad_mean,totper_mean,tasa_ocupacion,tasa_pobreza,tasa_nbi
