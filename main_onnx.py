@@ -3,10 +3,10 @@ FastAPI Server - Clustering Model ONNX (Versión Ligera)
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import onnxruntime as rt
 import numpy as np
-from typing import List, Dict
+from typing import List, Dict, Union
 import os
 import dotenv
 import requests
@@ -96,11 +96,42 @@ class ClusterResponse(BaseModel):
     cluster_name: str
     description: str
 
+class ClusterDefinition(BaseModel):
+    """Definición de cluster"""
+    value: int
+    name: str
+    description: str
+
 class BatchResponse(BaseModel):
     """Respuesta para lote"""
     total: int
     clusters: List[Dict]
     summary: Dict[str, int]
+
+class BatchRequest(BaseModel):
+    """Solicitud para predicción por lote"""
+    data: List[DepartmentData]
+    n_results: int = Field(default=10, ge=1, le=100)
+
+# Catálogo de clusters para reutilizar en endpoints
+CLUSTER_DEFINITIONS = {
+    0: {
+        "name": "Desarrollo Alto 🟢",
+        "description": "Indicadores socioeconómicos altos"
+    },
+    1: {
+        "name": "Desarrollo Medio-Alto 🔵",
+        "description": "Indicadores socioeconómicos medio-altos"
+    },
+    2: {
+        "name": "Desarrollo Medio-Bajo 🟠",
+        "description": "Indicadores socioeconómicos medio-bajos"
+    },
+    3: {
+        "name": "Desarrollo Bajo 🔴",
+        "description": "Indicadores socioeconómicos bajos"
+    }
+}
 
 # ═══════════════════════════════════════════════════════════════════════
 # ENDPOINTS
@@ -121,6 +152,18 @@ def home():
 def health_check():
     return {"status": "healthy", "ready": True}
 
+@app.get("/clusters", response_model=List[ClusterDefinition])
+def get_clusters():
+    """Retorna catálogo de clusters con valor, nombre y definición"""
+    return [
+        ClusterDefinition(
+            value=value,
+            name=data["name"],
+            description=data["description"]
+        )
+        for value, data in CLUSTER_DEFINITIONS.items()
+    ]
+
 @app.post("/predict", response_model=ClusterResponse)
 def predict_cluster(data: DepartmentData):
     """Predice el cluster"""
@@ -138,39 +181,43 @@ def predict_cluster(data: DepartmentData):
         pred_onnx = sess.run([output_name], {input_name: X_scaled})
         cluster = int(pred_onnx[0][0])
 
-        cluster_names = {
-            0: "Desarrollo Alto 🟢",
-            1: "Desarrollo Medio-Alto 🔵",
-            2: "Desarrollo Medio-Bajo 🟠",
-            3: "Desarrollo Bajo 🔴"
-        }
-
-        descriptions = {
-            0: "Indicadores socioeconómicos altos",
-            1: "Indicadores socioeconómicos medio-altos",
-            2: "Indicadores socioeconómicos medio-bajos",
-            3: "Indicadores socioeconómicos bajos"
-        }
-
         return ClusterResponse(
             cluster=cluster,
-            cluster_name=cluster_names[cluster],
-            description=descriptions[cluster]
+            cluster_name=CLUSTER_DEFINITIONS[cluster]["name"],
+            description=CLUSTER_DEFINITIONS[cluster]["description"]
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
 
 @app.post("/predict-batch", response_model=BatchResponse)
-def predict_batch(data_list: List[DepartmentData]):
+def predict_batch(payload: Union[BatchRequest, List[DepartmentData]]):
     """Predice para múltiples departamentos"""
+    if isinstance(payload, list):
+        data_list = payload
+        n_results = len(data_list)
+    else:
+        data_list = payload.data
+        n_results = payload.n_results
+
     if not data_list or len(data_list) > 100:
         raise HTTPException(status_code=400, detail="Entre 1 y 100 registros")
 
+    if n_results > len(data_list):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"n_results ({n_results}) no puede ser mayor al número de registros enviados ({len(data_list)})."
+            )
+        )
+
     try:
+        # Solo se procesan los n_results solicitados por el usuario
+        selected_data = data_list[:n_results]
+
         X_input = np.array([[
             d.ymophg_mean, d.ymophg_median, d.anosest_mean, d.edad_mean,
             d.totper_mean, d.tasa_ocupacion, d.tasa_pobreza, d.tasa_nbi
-        ] for d in data_list], dtype=np.float32)
+        ] for d in selected_data], dtype=np.float32)
 
         # Normalizar manualmente (sin sklearn)
         X_scaled = ((X_input - scaler_mean) / scaler_scale).astype(np.float32)
@@ -178,15 +225,15 @@ def predict_batch(data_list: List[DepartmentData]):
         clusters = pred_onnx[0].flatten().astype(int)
 
         results = []
-        cluster_count = {0: 0, 1: 0, 2: 0, 3: 0}
+        cluster_count = {"0": 0, "1": 0, "2": 0, "3": 0}
 
         for i, cluster in enumerate(clusters):
             cluster = int(cluster)
-            cluster_count[cluster] += 1
+            cluster_count[str(cluster)] += 1
             results.append({"index": i, "cluster": cluster})
 
         return BatchResponse(
-            total=len(data_list),
+            total=n_results,
             clusters=results,
             summary=cluster_count
         )
