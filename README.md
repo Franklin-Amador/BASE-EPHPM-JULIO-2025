@@ -80,7 +80,7 @@ Regresión logística que estima la probabilidad de que un hogar sea pobre sin u
 
 Resultado en 2025: ROC-AUC 0.785, exactitud balanceada 0.711, con umbral 0.50. LightGBM rinde igual en validación (0.784 frente a 0.781), así que se queda el modelo lineal.
 
-Limitación conocida: en 2025 el modelo subestima la pobreza entre 4 y 13 puntos en todos los tramos de probabilidad. Los hogares mejoran en educación y tamaño más rápido de lo que baja la pobreza, así que un modelo entrenado con años anteriores queda optimista. El modelo exportado se reajusta con todos los años, pero conviene recalibrarlo con cada encuesta nueva.
+Limitación conocida: en 2025 el modelo subestima la pobreza entre 5 y 12 puntos en todos los tramos de probabilidad. Una explicación probable, no comprobada: los hogares mejoran en educación y tamaño más rápido de lo que baja la pobreza, y un modelo entrenado con años anteriores queda optimista. El modelo exportado se reajusta con todos los años, pero conviene recalibrarlo con cada encuesta nueva.
 
 ```bash
 python src/poverty_model.py                    # comparación de modelos base
