@@ -1,27 +1,70 @@
 """
-FastAPI Server - Clustering Model ONNX (Versión Ligera)
+FastAPI server - EPHPM Honduras: indicator panel by department and year,
+plus the KMeans model (ONNX) that assigns a living-conditions level.
+
+The three artifacts are loaded into memory from Vercel Blob at startup:
+  MODEL_BLOB_URL       clustering_panel.onnx  StandardScaler + KMeans (input is NOT scaled by hand)
+  MODEL_META_BLOB_URL  clustering_panel.json  feature order and cluster profiles
+  PANEL_BLOB_URL       panel.json             indicators per year and department
+
+For local development, when those variables are not all set, the same files are read
+from models/ and api_data/ (both produced by src/clustering.py and src/export_panel.py
+and kept out of git).
 """
-from fastapi import FastAPI, HTTPException
+import json
+import os
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import dotenv
+import numpy as np
+import onnxruntime as rt
+import requests
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-import onnxruntime as rt
-import numpy as np
-from typing import List, Dict, Union
-import os
-import dotenv
-import requests
-import json
 
-#Cargar variables de entorno
 dotenv.load_dotenv()
 
+BASE = Path(__file__).resolve().parent
+
+ARTIFACTS = {
+    "MODEL_BLOB_URL": BASE / "models" / "clustering_panel.onnx",
+    "MODEL_META_BLOB_URL": BASE / "models" / "clustering_panel.json",
+    "PANEL_BLOB_URL": BASE / "api_data" / "panel.json",
+}
+
+
+def load_artifacts() -> Dict[str, bytes]:
+    """Fetch the three artifacts from Blob, or from local files when Blob is not configured."""
+    urls = {name: os.getenv(name) for name in ARTIFACTS}
+    if all(urls.values()):
+        out = {}
+        for name, url in urls.items():
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            out[name] = response.content
+            print(f"{name}: {len(response.content)} bytes desde Blob")
+        return out
+    missing = [name for name, url in urls.items() if not url]
+    print(f"AVISO: faltan {missing}; usando archivos locales (solo para desarrollo)")
+    try:
+        return {name: path.read_bytes() for name, path in ARTIFACTS.items()}
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Sin Blob configurado ({missing}) y sin archivo local {exc.filename}. "
+            "Define las tres variables *_BLOB_URL."
+        ) from exc
+
+
+artifacts = load_artifacts()
+
 app = FastAPI(
-    title="🗺️ Honduras Clustering API (ONNX)",
-    description="API ligera para clasificar departamentos - Solo 50MB",
-    version="2.0.0 - ONNX + Vercel Blob"
+    title="EPHPM Honduras API",
+    description="Indicadores socioeconómicos por departamento y año, y nivel de condiciones de vida (KMeans, ONNX).",
+    version="3.0.0",
 )
 
-# Configuración de CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,226 +73,125 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ═══════════════════════════════════════════════════════════════════════
-# CARGAR MODELOS DIRECTAMENTE DESDE VERCEL BLOB (EN RAM)
-# ═══════════════════════════════════════════════════════════════════════
+PANEL = json.loads(artifacts["PANEL_BLOB_URL"].decode("utf-8"))
+MODEL_META = json.loads(artifacts["MODEL_META_BLOB_URL"].decode("utf-8"))
+FEATURES: List[str] = MODEL_META["features"]
 
-def load_from_url(url: str, description: str = "archivo"):
-    """Carga un archivo directamente desde URL a memoria"""
-    try:
-        print(f"📥 Cargando {description} desde blob...")
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        print(f"✅ {description} cargado en RAM ({len(response.content)} bytes)")
-        return response.content
-    except Exception as e:
-        raise Exception(f"❌ Error cargando {description} desde {url}: {str(e)}")
-
-# Obtener URLs desde .env
-MODEL_BLOB_URL = os.getenv("MODEL_BLOB_URL")
-SCALER_PARAMS_BLOB_URL = os.getenv("SCALER_PARAMS_BLOB_URL")
-FEATURE_NAMES_BLOB_URL = os.getenv("FEATURE_NAMES_BLOB_URL")
-
-if not all([MODEL_BLOB_URL, SCALER_PARAMS_BLOB_URL, FEATURE_NAMES_BLOB_URL]):
-    raise ValueError("❌ Faltan variables de entorno para Vercel Blob (MODEL_BLOB_URL, SCALER_PARAMS_BLOB_URL, FEATURE_NAMES_BLOB_URL)")
-
-print("🔄 Cargando modelos desde Vercel Blob Storage...")
-
-# Cargar modelo ONNX directamente en RAM
-model_bytes = load_from_url(MODEL_BLOB_URL, "Modelo ONNX")
-sess = rt.InferenceSession(model_bytes, providers=['CPUExecutionProvider'])
+sess = rt.InferenceSession(artifacts["MODEL_BLOB_URL"], providers=["CPUExecutionProvider"])
 input_name = sess.get_inputs()[0].name
-output_name = sess.get_outputs()[0].name
+label_output = sess.get_outputs()[0].name
 
-# Cargar parámetros del scaler (JSON, sin necesidad de sklearn)
-scaler_params_bytes = load_from_url(SCALER_PARAMS_BLOB_URL, "Scaler Params")
-scaler_params = json.loads(scaler_params_bytes.decode('utf-8'))
-scaler_mean = np.array(scaler_params['mean'])
-scaler_scale = np.array(scaler_params['scale'])
+# Guards against pointing MODEL_BLOB_URL at a model from another version (e.g. the old 8-feature one).
+n_inputs = sess.get_inputs()[0].shape[-1]
+if n_inputs != len(FEATURES):
+    raise RuntimeError(f"El modelo espera {n_inputs} variables y el metadato declara {len(FEATURES)}.")
 
-# Cargar feature names directamente en RAM
-features_bytes = load_from_url(FEATURE_NAMES_BLOB_URL, "Feature Names")
-feature_names = features_bytes.decode('utf-8').strip().split(',')
+CLUSTERS = {c["id"]: c for c in PANEL["clusters"]}
+DEPARTMENTS = {d["code"]: d for d in PANEL["departments"]}
 
-print(f"✅ Modelo ONNX cargado en RAM")
-print(f"✅ Scaler params cargado en RAM (sin sklearn)")
-print(f"✅ Características: {len(feature_names)}")
 
-# ═══════════════════════════════════════════════════════════════════════
-# SCHEMAS
-# ═══════════════════════════════════════════════════════════════════════
+class Indicators(BaseModel):
+    """The six indicators the model uses. Rates are fractions between 0 and 1."""
+    tasa_pobreza: float = Field(ge=0, le=1)
+    tasa_pobreza_extrema: float = Field(ge=0, le=1)
+    ymophg_median_rel: float = Field(gt=0, le=5, description="Ingreso mediano / mediana nacional del año")
+    tasa_ocupacion: float = Field(ge=0, le=1)
+    tasa_desempleo: float = Field(ge=0, le=1)
+    tasa_dependencia: float = Field(ge=0, le=3)
 
-class DepartmentData(BaseModel):
-    """Datos de un departamento"""
-    ymophg_mean: float
-    ymophg_median: float
-    anosest_mean: float
-    edad_mean: float
-    totper_mean: float
-    tasa_ocupacion: float
-    tasa_pobreza: float
-    tasa_nbi: float
 
 class ClusterResponse(BaseModel):
-    """Respuesta con cluster"""
     cluster: int
     cluster_name: str
     description: str
 
-class ClusterDefinition(BaseModel):
-    """Definición de cluster"""
-    value: int
-    name: str
-    description: str
 
 class BatchResponse(BaseModel):
-    """Respuesta para lote"""
     total: int
     clusters: List[Dict]
     summary: Dict[str, int]
 
-class BatchRequest(BaseModel):
-    """Solicitud para predicción por lote"""
-    data: List[DepartmentData]
-    n_results: int = Field(default=10, ge=1, le=100)
 
-# Catálogo de clusters para reutilizar en endpoints
-CLUSTER_DEFINITIONS = {
-    0: {
-        "name": "Desarrollo Alto 🟢",
-        "description": "Indicadores socioeconómicos altos"
-    },
-    1: {
-        "name": "Desarrollo Medio-Alto 🔵",
-        "description": "Indicadores socioeconómicos medio-altos"
-    },
-    2: {
-        "name": "Desarrollo Medio-Bajo 🟠",
-        "description": "Indicadores socioeconómicos medio-bajos"
-    },
-    3: {
-        "name": "Desarrollo Bajo 🔴",
-        "description": "Indicadores socioeconómicos bajos"
-    }
-}
+def predict(items: List[Indicators]) -> List[int]:
+    X = np.array([[getattr(d, f) for f in FEATURES] for d in items], dtype=np.float32)
+    return [int(c) for c in sess.run([label_output], {input_name: X})[0].flatten()]
 
-# ═══════════════════════════════════════════════════════════════════════
-# ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════════
 
 @app.get("/")
 def home():
-    """Información de la API"""
     return {
-        "mensaje": "🗺️ API de Clustering Honduras (ONNX Lightweight)",
-        "versión": "2.0.0",
-        "modelo": "ONNX + onnxruntime",
-        "storage": "Vercel Blob (carga directa en RAM)",
-        "tamaño": "~50 MB (95% más ligero)"
+        "api": "EPHPM Honduras",
+        "version": app.version,
+        "fuente": PANEL["source"],
+        "años": PANEL["years"],
+        "endpoints": ["/years", "/indicators", "/clusters", "/national",
+                      "/departments?year=", "/departments/{code}/series", "/predict", "/info"],
     }
+
 
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "ready": True}
 
-@app.get("/clusters", response_model=List[ClusterDefinition])
-def get_clusters():
-    """Retorna catálogo de clusters con valor, nombre y definición"""
-    return [
-        ClusterDefinition(
-            value=value,
-            name=data["name"],
-            description=data["description"]
-        )
-        for value, data in CLUSTER_DEFINITIONS.items()
-    ]
+
+@app.get("/years")
+def years():
+    """Survey years in the panel, and the subset that has a cluster."""
+    return {"years": PANEL["years"], "cluster_years": PANEL["cluster_years"],
+            "note": PANEL["missing_years_note"]}
+
+
+@app.get("/indicators")
+def indicators():
+    return PANEL["indicators"]
+
+
+@app.get("/clusters")
+def clusters():
+    return PANEL["clusters"]
+
+
+@app.get("/national")
+def national():
+    """National series, one record per survey year."""
+    return PANEL["national"]
+
+
+@app.get("/departments")
+def departments(year: Optional[int] = Query(default=None)):
+    """Indicators and cluster of every department for one year (latest by default)."""
+    year = year or PANEL["years"][-1]
+    if year not in PANEL["years"]:
+        raise HTTPException(status_code=404, detail=f"Sin datos para {year}. Años: {PANEL['years']}")
+    return [{**r, "name": DEPARTMENTS[r["depto"]]["name"]} for r in PANEL["rows"] if r["anio"] == year]
+
+
+@app.get("/departments/{code}/series")
+def department_series(code: int):
+    if code not in DEPARTMENTS:
+        raise HTTPException(status_code=404, detail="Código de departamento desconocido (1-18)")
+    return {"department": DEPARTMENTS[code],
+            "series": [r for r in PANEL["rows"] if r["depto"] == code]}
+
 
 @app.post("/predict", response_model=ClusterResponse)
-def predict_cluster(data: DepartmentData):
-    """Predice el cluster"""
-    try:
-        # Preparar datos
-        X_input = np.array([[
-            data.ymophg_mean, data.ymophg_median, data.anosest_mean, data.edad_mean,
-            data.totper_mean, data.tasa_ocupacion, data.tasa_pobreza, data.tasa_nbi
-        ]], dtype=np.float32)
+def predict_cluster(data: Indicators):
+    cluster = predict([data])[0]
+    return ClusterResponse(cluster=cluster, cluster_name=CLUSTERS[cluster]["name"],
+                           description=CLUSTERS[cluster]["description"])
 
-        # Normalizar manualmente (sin sklearn)
-        X_scaled = ((X_input - scaler_mean) / scaler_scale).astype(np.float32)
-
-        # Predicción con ONNX
-        pred_onnx = sess.run([output_name], {input_name: X_scaled})
-        cluster = int(pred_onnx[0][0])
-
-        return ClusterResponse(
-            cluster=cluster,
-            cluster_name=CLUSTER_DEFINITIONS[cluster]["name"],
-            description=CLUSTER_DEFINITIONS[cluster]["description"]
-        )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
 
 @app.post("/predict-batch", response_model=BatchResponse)
-def predict_batch(payload: Union[BatchRequest, List[DepartmentData]]):
-    """Predice para múltiples departamentos"""
-    if isinstance(payload, list):
-        data_list = payload
-        n_results = len(data_list)
-    else:
-        data_list = payload.data
-        n_results = payload.n_results
+def predict_batch(payload: List[Indicators]):
+    if not payload or len(payload) > 200:
+        raise HTTPException(status_code=400, detail="Entre 1 y 200 registros")
+    labels = predict(payload)
+    summary = {str(c): labels.count(c) for c in CLUSTERS}
+    return BatchResponse(total=len(labels),
+                         clusters=[{"index": i, "cluster": c} for i, c in enumerate(labels)],
+                         summary=summary)
 
-    if not data_list or len(data_list) > 100:
-        raise HTTPException(status_code=400, detail="Entre 1 y 100 registros")
-
-    if n_results > len(data_list):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"n_results ({n_results}) no puede ser mayor al número de registros enviados ({len(data_list)})."
-            )
-        )
-
-    try:
-        # Solo se procesan los n_results solicitados por el usuario
-        selected_data = data_list[:n_results]
-
-        X_input = np.array([[
-            d.ymophg_mean, d.ymophg_median, d.anosest_mean, d.edad_mean,
-            d.totper_mean, d.tasa_ocupacion, d.tasa_pobreza, d.tasa_nbi
-        ] for d in selected_data], dtype=np.float32)
-
-        # Normalizar manualmente (sin sklearn)
-        X_scaled = ((X_input - scaler_mean) / scaler_scale).astype(np.float32)
-        pred_onnx = sess.run([output_name], {input_name: X_scaled})
-        clusters = pred_onnx[0].flatten().astype(int)
-
-        results = []
-        cluster_count = {"0": 0, "1": 0, "2": 0, "3": 0}
-
-        for i, cluster in enumerate(clusters):
-            cluster = int(cluster)
-            cluster_count[str(cluster)] += 1
-            results.append({"index": i, "cluster": cluster})
-
-        return BatchResponse(
-            total=n_results,
-            clusters=results,
-            summary=cluster_count
-        )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
 
 @app.get("/info")
 def model_info():
-    """Info del modelo"""
-    return {
-        "modelo": "KMeans (ONNX)",
-        "n_clusters": 4,
-        "features": feature_names,
-        "n_features": len(feature_names),
-        "framework": "onnxruntime",
-        "storage": "Vercel Blob (RAM only)",
-        "memoria": "~50 MB"
-    }
-
+    return {**PANEL["model"], "framework": "onnxruntime", "generated": PANEL["generated"]}

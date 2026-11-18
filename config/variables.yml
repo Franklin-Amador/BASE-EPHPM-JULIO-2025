@@ -1,0 +1,66 @@
+# Harmonisation map for the EPHPM person-level files published by INE Honduras
+# (https://ine.gob.hn/bases-de-datos/). Column names are matched case-insensitively.
+
+# Canonical department codes (2007-2011 and 2019-2025 files use this coding).
+depto_names:
+  1: Atlántida
+  2: Colón
+  3: Comayagua
+  4: Copán
+  5: Cortés
+  6: Choluteca
+  7: El Paraíso
+  8: Francisco Morazán
+  9: Gracias a Dios
+  10: Intibucá
+  11: Islas de la Bahía
+  12: La Paz
+  13: Lempira
+  14: Ocotepeque
+  15: Olancho
+  16: Santa Bárbara
+  17: Valle
+  18: Yoro
+
+# concept -> accepted column names, first match wins
+aliases:
+  hogar_id: [HOGAR, ID, Boleta]
+  num_hog: [NUM_HOG]
+  cor_pre: [COR_PRE, CORPRE]
+  depto: [DEPTO, DEPMUESTRA]
+  factor: [FACTOR]
+  edad: [EDAD]
+  totper: [TOTPER]
+  anosest: [ANOSEST]
+  condact: [CONDACT]      # 1 Ocupados, 2 Desocupados, 3 Inactivos / fuera de la fuerza de trabajo
+  ymop: [YMOP]            # person-level income from main occupation
+  ymophg: [YMOPHG]        # household-level; when absent it is derived as sum(YMOP)
+  pobreza: [POBREZA]      # 1 Extrema, 2 Relativa, 3 No pobres (household level)
+  nbi: [NBI]              # 0 none, 1, 2, 3+ unsatisfied basic needs
+  ur: [UR]                # 1 urbano, 2 rural
+  rela_j: [RELA_J]        # 1 = jefe(a) del hogar in every year
+  sexo: [SEXO, C03]       # 1 hombre, 2 mujer (2021 names it C03)
+  ramaop: [RAMAOP]        # 1 = agricultura in every year; other codes change in 2018
+  categop: [CATEGOP]      # 4 = cuenta propia (2018 also folds employers into 4)
+  yperhg: [YPERHG]        # household income per capita, absent in 2021-2022
+  yhreme: [YHREME]        # household remittance income, only 2018, 2019, 2023-2025
+
+# Per-file settings.
+#   depto_from_cor_pre: the file has no usable residence department; it is taken from
+#     floor(COR_PRE / 10000), which matches DEPTO in 100% of the rows that have it
+#     in 2019, 2021 and 2025.
+#   swap_depto_9_11: the 2018 file labels 9 = Islas de la Bahía and 11 = Gracias a Dios.
+# 2001-2006 are left out: those files have no YMOPHG/YMOP-based household income.
+years:
+  2007: {file: 2001-2011/hogar2007.sav}
+  2008: {file: 2001-2011/Hogar2008.sav}
+  2009: {file: 2001-2011/Hogar2009.sav}
+  2010: {file: 2001-2011/Hogar2010.sav}
+  2011: {file: 2001-2011/Hogar2011.sav}
+  2018: {file: 2018/Hogar2018.sav, swap_depto_9_11: true}
+  2019: {file: 2019/Hogar2019.sav, depto_from_cor_pre: true}  # depto is blank on 76% of rows
+  2021: {file: 2021/HOGARES_OCTUBRE_2021R.sav}
+  2022: {file: 2022/EPHPM2022.sav, depto_from_cor_pre: true}
+  2023: {file: "2023/Data de la Encuesta de Hogares junio 2023.sav", depto_from_cor_pre: true}
+  2024: {file: "2024/Data de la Encuesta de Hogares 2024_PDVF.sav"}
+  2025: {file: "2025/EPHPM JDULIO 2025.sav"}

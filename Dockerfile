@@ -4,8 +4,7 @@ WORKDIR /app
 
 # Copiar archivos necesarios
 COPY requirements.txt .
-COPY fastapi_app_onnx.py .
-COPY models/ ./models/
+COPY main_onnx.py .
 
 # Instalar dependencias (sin cache para reducir tamaño)
 RUN pip install --no-cache-dir -r requirements.txt
@@ -14,4 +13,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 EXPOSE 8000
 
 # Comando por defecto
-CMD ["uvicorn", "fastapi_app_onnx:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main_onnx:app", "--host", "0.0.0.0", "--port", "8000"]

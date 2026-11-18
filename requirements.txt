@@ -1,4 +1,4 @@
-# Dependencias mínimas para DEPLOY (fastapi_app_onnx.py)
+# Dependencias mínimas para DEPLOY (main_onnx.py)
 # Para desarrollo local, usar: pip install -r requirements_local.txt
 # Tamaño total: ~150 MB (optimizado para Vercel/Railway/Render)
 
@@ -7,6 +7,7 @@
 # ═══════════════════════════════════════════════════════════════════════
 fastapi[standard]==0.128.0
 python-dotenv==1.0.0
+requests==2.31.0   # carga del modelo y el panel desde Vercel Blob
 
 # ═══════════════════════════════════════════════════════════════════════
 # DATA & ML - Mínimo necesario
@@ -17,11 +18,6 @@ numpy==1.26.4
 # ONNX - Solo Runtime (NO conversion tools)
 # ═══════════════════════════════════════════════════════════════════════
 onnxruntime==1.23.2
-
-# ═══════════════════════════════════════════════════════════════════════
-# HTTP CLIENT - Para cargar modelos desde Vercel Blob
-# ═══════════════════════════════════════════════════════════════════════
-requests==2.31.0
 
 # ═══════════════════════════════════════════════════════════════════════
 # PRODUCCIÓN (opcional - descomentarlo para usar Gunicorn)

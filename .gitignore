@@ -68,3 +68,7 @@ logs/
 # Temporary
 temp/
 tmp/
+
+# Model and panel artifacts live in Vercel Blob, not in git
+models/clustering_panel.*
+api_data/
