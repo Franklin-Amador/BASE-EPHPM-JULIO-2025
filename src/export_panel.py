@@ -57,6 +57,37 @@ CLUSTER_NAMES = [
 ]
 
 
+# Plain-language names for the poverty model's strongest factors (key in odds_ratios).
+POVERTY_FACTORS = [
+    ("jefe_agricultura", "La persona a cargo del hogar trabaja en agricultura"),
+    ("max_educ_0.0", "Nadie en el hogar pasó de 5 años de estudio"),
+    ("totper", "El hogar es más numeroso"),
+    ("jefe_educ_0.0", "La persona a cargo estudió menos de 6 años"),
+    ("menores_por_persona", "Hay más niños por persona en el hogar"),
+    ("jefa_mujer", "El hogar lo dirige una mujer"),
+    ("ocupados_por_persona", "Hay más personas con trabajo en el hogar"),
+    ("jefe_educ_2.0", "La persona a cargo tiene estudios superiores"),
+    ("rural", "El hogar está en zona rural"),
+    ("max_educ_2.0", "Alguien en el hogar tiene estudios superiores"),
+]
+
+
+def poverty_block() -> dict:
+    """Summary of the household poverty model for the dashboard."""
+    meta = json.loads((ROOT / "models" / "poverty_logreg.json").read_text(encoding="utf-8"))
+    hogares = pd.read_parquet(PROC / "hogares.parquet", columns=["anio", "pobre", "depto"])
+    hogares = hogares[hogares["pobre"].notna() & hogares["depto"].notna()]
+    count = lambda years: int(hogares["anio"].isin(years).sum())
+    return {
+        "algorithm": "Regresión logística",
+        "n_features": len(meta["features"]),
+        "train_years": meta["train_years"], "valid_years": meta["valid_years"], "test_years": meta["test_years"],
+        "n_train": count(meta["train_years"]), "n_valid": count(meta["valid_years"]), "n_test": count(meta["test_years"]),
+        "test": meta["test"],
+        "factors": [{"label": label, "odds": meta["odds_ratios"][key]} for key, label in POVERTY_FACTORS],
+    }
+
+
 def geo_key(name: str) -> str:
     """Accent-free, space-free lowercase key; matches GADM NAME_1 after the same transform."""
     s = unicodedata.normalize("NFD", name)
@@ -103,6 +134,7 @@ def main():
             "silhouette": meta["silhouette"],
             "rows": int(len(clusters)),
         },
+        "poverty_model": poverty_block(),
         "clusters": [
             {"id": i, "name": CLUSTER_NAMES[i][0], "description": CLUSTER_NAMES[i][1],
              "profile": {k: v for k, v in prof.items() if k != "cluster"}}
