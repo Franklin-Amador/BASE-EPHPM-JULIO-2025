@@ -32,6 +32,7 @@ python src/clustering.py evaluate                # compara variables, algoritmos
 python src/clustering.py fit --set nucleo --k 3  # models/clustering_panel.onnx y .json
 python src/export_panel.py --front "../EPHPM Front/frontend-EPHPM-2025"
 python src/poverty_model.py                      # baseline supervisado de pobreza por hogar
+PYTHONPATH=src python src/poverty_logreg.py      # regresión logística de pobreza: ajuste, prueba y ONNX
 ```
 
 ## Modelo de niveles
@@ -67,6 +68,23 @@ uvicorn main_onnx:app --reload
 | `POST /predict` | Nivel para 6 indicadores |
 | `POST /predict-batch` | Lo mismo para una lista |
 
-## Baseline de pobreza por hogar
+## Modelo de pobreza por hogar
 
-Predice si un hogar es pobre sin usar ingresos (la pobreza se define con el ingreso). Entrena con 2007–2019, valida con 2023–2024 y prueba con 2025. Resultado en 2025: ROC-AUC 0.78. La regresión logística y LightGBM rinden casi igual en validación (0.780 y 0.784).
+Regresión logística que estima la probabilidad de que un hogar sea pobre sin usar ingresos (la pobreza se define con el ingreso). Variables: tamaño y composición del hogar, ocupados por persona, edad, sexo, ocupación y educación del jefe, educación máxima del hogar, área y departamento.
+
+| Paso | Años |
+|---|---|
+| Entrenamiento | 2007–2011, 2018, 2019 |
+| Validación (regularización y umbral) | 2023, 2024 |
+| Prueba, una sola vez | 2025 |
+
+Resultado en 2025: ROC-AUC 0.785, exactitud balanceada 0.711, con umbral 0.50. LightGBM rinde igual en validación (0.784 frente a 0.781), así que se queda el modelo lineal.
+
+Limitación conocida: en 2025 el modelo subestima la pobreza entre 4 y 13 puntos en todos los tramos de probabilidad. Los hogares mejoran en educación y tamaño más rápido de lo que baja la pobreza, así que un modelo entrenado con años anteriores queda optimista. El modelo exportado se reajusta con todos los años, pero conviene recalibrarlo con cada encuesta nueva.
+
+```bash
+python src/poverty_model.py                    # comparación de modelos base
+PYTHONPATH=src python src/poverty_logreg.py    # ajuste, prueba y models/poverty_logreg.onnx
+```
+
+El ONNX recibe una entrada por variable (ver `models/poverty_logreg.json`) y, como los demás artefactos, no se versiona en git.
