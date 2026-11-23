@@ -57,25 +57,42 @@ CLUSTER_NAMES = [
 ]
 
 
-# Plain-language names for the poverty model's strongest factors (key in odds_ratios).
+# Household groups whose observed poverty rate the dashboard shows.
+# These are weighted survey rates, not model coefficients: the model's odds ratios are
+# conditional on correlated features (e.g. "rural" flips sign once agriculture is in),
+# so they mislead when read one at a time.
 POVERTY_FACTORS = [
-    ("jefe_agricultura", "La persona a cargo del hogar trabaja en agricultura"),
-    ("max_educ_0.0", "Nadie en el hogar pasó de 5 años de estudio"),
-    ("totper", "El hogar es más numeroso"),
-    ("jefe_educ_0.0", "La persona a cargo estudió menos de 6 años"),
-    ("menores_por_persona", "Hay más niños por persona en el hogar"),
-    ("jefa_mujer", "El hogar lo dirige una mujer"),
-    ("ocupados_por_persona", "Hay más personas con trabajo en el hogar"),
-    ("jefe_educ_2.0", "La persona a cargo tiene estudios superiores"),
-    ("rural", "El hogar está en zona rural"),
-    ("max_educ_2.0", "Alguien en el hogar tiene estudios superiores"),
+    ("Nadie en el hogar tiene trabajo", lambda h: h["n_ocupados"] == 0),
+    ("La mitad o más del hogar son menores de 15 años", lambda h: h["n_menores"] / h["n_personas"] >= 0.5),
+    ("En el hogar viven 6 personas o más", lambda h: h["totper"] >= 6),
+    ("Nadie en el hogar pasó de 5 años de estudio", lambda h: h["max_educ"] == 0),
+    ("La persona a cargo del hogar trabaja en agricultura", lambda h: h["jefe_agricultura"] == 1),
+    ("La persona a cargo estudió menos de 6 años", lambda h: h["jefe_educ"] == 0),
+    ("El hogar lo dirige una mujer", lambda h: h["jefa_mujer"] == 1),
+    ("El hogar está en zona rural", lambda h: h["ur"] == 2),
+    ("Trabaja la mitad o más del hogar", lambda h: h["n_ocupados"] / h["n_personas"] >= 0.5),
+    ("Alguien en el hogar tiene estudios superiores", lambda h: h["max_educ"] == 2),
+    ("La persona a cargo tiene estudios superiores", lambda h: h["jefe_educ"] == 2),
 ]
+
+
+def poverty_factors(hogares: pd.DataFrame, year: int) -> dict:
+    """Weighted poverty rate of each household group in one survey year."""
+    h = hogares[(hogares["anio"] == year) & hogares["factor"].notna()]
+    rate = lambda d: round(float((d["pobre"] * d["factor"]).sum() / d["factor"].sum()), 4)
+    factors = []
+    for label, in_group in POVERTY_FACTORS:
+        group = h[in_group(h).fillna(False)]
+        factors.append({"label": label, "rate": rate(group),
+                        "share": round(float(group["factor"].sum() / h["factor"].sum()), 4),
+                        "n": int(len(group))})
+    return {"factors_year": year, "factors_national": rate(h), "factors": factors}
 
 
 def poverty_block() -> dict:
     """Summary of the household poverty model for the dashboard."""
     meta = json.loads((ROOT / "models" / "poverty_logreg.json").read_text(encoding="utf-8"))
-    hogares = pd.read_parquet(PROC / "hogares.parquet", columns=["anio", "pobre", "depto"])
+    hogares = pd.read_parquet(PROC / "hogares.parquet")
     hogares = hogares[hogares["pobre"].notna() & hogares["depto"].notna()]
     count = lambda years: int(hogares["anio"].isin(years).sum())
     return {
@@ -84,7 +101,7 @@ def poverty_block() -> dict:
         "train_years": meta["train_years"], "valid_years": meta["valid_years"], "test_years": meta["test_years"],
         "n_train": count(meta["train_years"]), "n_valid": count(meta["valid_years"]), "n_test": count(meta["test_years"]),
         "test": meta["test"],
-        "factors": [{"label": label, "odds": meta["odds_ratios"][key]} for key, label in POVERTY_FACTORS],
+        **poverty_factors(hogares, int(hogares["anio"].max())),
     }
 
 
