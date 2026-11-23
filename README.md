@@ -75,12 +75,21 @@ Regresión logística que estima la probabilidad de que un hogar sea pobre sin u
 | Paso | Años |
 |---|---|
 | Entrenamiento | 2007–2011, 2018, 2019 |
-| Validación (regularización y umbral) | 2023, 2024 |
-| Prueba, una sola vez | 2025 |
+| Validación (regularización, vida media y umbral) | 2023, 2024, cada uno predicho con los años anteriores |
+| Prueba | 2025 |
 
-Resultado en 2025: ROC-AUC 0.785, exactitud balanceada 0.711, con umbral 0.50. LightGBM rinde igual en validación (0.784 frente a 0.781), así que se queda el modelo lineal.
+Cada encuesta pesa lo mismo sin importar su tamaño, y su peso se reduce a la mitad por cada año de antigüedad (vida media de 1 año, elegida en validación por puntaje de Brier). Sin esos pesos, 2007–2009 son el 64 % de las filas y el modelo reproduce el nivel de pobreza de esos años.
 
-Limitación conocida: en 2025 el modelo subestima la pobreza entre 5 y 12 puntos en todos los tramos de probabilidad. Una explicación probable, no comprobada: los hogares mejoran en educación y tamaño más rápido de lo que baja la pobreza, y un modelo entrenado con años anteriores queda optimista. El modelo exportado se reajusta con todos los años, pero conviene recalibrarlo con cada encuesta nueva.
+Resultado en 2025: ROC-AUC 0.799, exactitud balanceada 0.720, Brier 0.179, con umbral 0.66. La probabilidad media es 60.6 % frente a una pobreza observada de 59.8 %. Sin pesos por año el mismo modelo daba ROC-AUC 0.785, Brier 0.190 y 51.8 %.
+
+Limitaciones conocidas:
+
+- 2025 ya no es una prueba limpia: se usó para diagnosticar la mala calibración que motivó los pesos. La elección de hiperparámetros solo usa 2023 y 2024, pero la próxima prueba independiente será la EPHPM 2026.
+- La vida media elegida es la menor de la rejilla: en la práctica el modelo aprende de las encuestas posteriores al cambio de método de 2021.
+- No sirve para estimar la pobreza de un departamento: en 2025 el error medio de la tasa departamental era de 7.8 puntos con el modelo sin pesos, y no se ha vuelto a medir.
+- Las razones de momios no se publican: las variables están correlacionadas entre sí y, leídas una a una, engañan (zona rural aparece reduciendo la pobreza). El dashboard muestra tasas observadas por tipo de hogar.
+
+El modelo exportado se reajusta con todos los años, ponderado hacia la siguiente encuesta; sus métricas son las del ajuste anterior.
 
 ```bash
 python src/poverty_model.py                    # comparación de modelos base

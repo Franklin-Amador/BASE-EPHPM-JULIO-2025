@@ -1,11 +1,16 @@
-"""Logistic regression for household poverty: tune, pick a threshold, test once, export.
+"""Logistic regression for household poverty: tune, pick a threshold, test, export.
 
-Same split by survey year as poverty_model.py:
-  train 2007-2019 -> choose C, class weights and the decision threshold on 2023-2024
-  refit on train + valid -> report once on 2025
+Same survey years as poverty_model.py, validated forward in time:
+  each validation year (2023, 2024) is predicted by a model fitted on the years before it
+  -> choose C, the recency half-life and the decision threshold on those predictions
+  refit on train + valid -> report on 2025
 The exported model is refit on every year with a poverty label.
 
-Usage: python src/poverty_logreg.py
+Rows are weighted so that every survey year counts the same before a recency decay.
+Without it 2007-2009 are 64% of the rows and the model predicts the poverty level of
+those years: it fell 8 points short in 2025.
+
+Usage: PYTHONPATH=src python src/poverty_logreg.py
 """
 import json
 from pathlib import Path
@@ -33,6 +38,23 @@ MODELS = ROOT / "models"
 EXTRA_NUMERIC = ["menores_por_persona", "mayores_por_persona"]
 NUM = NUMERIC + EXTRA_NUMERIC
 FEATURES = NUM + BINARY + CATEGORICAL
+
+C_GRID = (0.001, 0.003, 0.01, 0.03, 0.1, 1)
+# Years for a survey's weight to halve; None = every row weighs the same (the old behaviour).
+HALF_LIFE_GRID = (None, 1, 1.5, 2, 3, 4, 6)
+
+
+def year_weights(anio: pd.Series, target_year: int, half_life) -> np.ndarray:
+    """Row weights (mean 1) for a model meant to predict `target_year`."""
+    if half_life is None:
+        return np.ones(len(anio))
+    w = 0.5 ** ((target_year - anio) / half_life) / anio.map(anio.value_counts())
+    return (w / w.mean()).to_numpy()
+
+
+def fit(data: pd.DataFrame, target_year: int, C: float, half_life) -> Pipeline:
+    return build(C, None).fit(data[FEATURES], data[TARGET],
+                              clf__sample_weight=year_weights(data["anio"], target_year, half_life))
 
 
 def add_features(h: pd.DataFrame) -> pd.DataFrame:
@@ -63,46 +85,57 @@ def metrics(y, proba, threshold: float) -> dict:
         "brier": brier_score_loss(y, proba),
         "balanced_accuracy": balanced_accuracy_score(y, pred),
         "f1": f1_score(y, pred),
-        "recall_pobres": tp / (tp + fn),
-        "recall_no_pobres": tn / (tn + fp),
+        "recall_pobres": float(tp / (tp + fn)),
+        "recall_no_pobres": float(tn / (tn + fp)),
         "pct_predicho_pobre": float(pred.mean()),
+        # The model's estimate of the poverty rate: the mean probability, not the share
+        # above the threshold (the threshold is tuned for balanced accuracy, not for that).
+        "prob_media": float(np.mean(proba)),
     }
 
 
 def main():
     h = add_features(load())
     train, valid, test = (h[h["anio"].isin(y)] for y in (TRAIN_YEARS, VALID_YEARS, TEST_YEARS))
+    fit_tv = pd.concat([train, valid])
 
-    # 1) Regularisation strength and class weights, judged on the validation years.
-    rows = []
-    for cw in (None, "balanced"):
-        for C in (0.0003, 0.001, 0.003, 0.01, 0.03, 0.1, 1, 10):
-            m = build(C, cw).fit(train[FEATURES], train[TARGET])
-            p = m.predict_proba(valid[FEATURES])[:, 1]
-            rows.append({"class_weight": str(cw), "C": C,
-                         "roc_auc": roc_auc_score(valid[TARGET], p),
-                         "auprc": average_precision_score(valid[TARGET], p),
-                         "brier": brier_score_loss(valid[TARGET], p)})
+    # 1) Regularisation and recency half-life. Each validation year is predicted from the
+    #    years before it. Judged by Brier score: the dashboard publishes the predicted share
+    #    of poor households, so the probabilities have to be right, not just the ranking.
+    rows, oof = [], {}
+    for half_life in HALF_LIFE_GRID:
+        for C in C_GRID:
+            p = pd.Series(index=valid.index, dtype=float)
+            for year in VALID_YEARS:
+                past, now = fit_tv[fit_tv["anio"] < year], valid[valid["anio"] == year]
+                p[now.index] = fit(past, year, C, half_life).predict_proba(now[FEATURES])[:, 1]
+            oof[(half_life, C)] = p.to_numpy()
+            by_year = [(roc_auc_score(g[TARGET], p[g.index]), brier_score_loss(g[TARGET], p[g.index]))
+                       for _, g in valid.groupby("anio")]
+            rows.append({"half_life": half_life, "C": C,
+                         "roc_auc": np.mean([a for a, _ in by_year]),
+                         "brier": np.mean([b for _, b in by_year]),
+                         "pred_pobre": p.mean()})
     grid = pd.DataFrame(rows)
-    print(grid.round(4).to_string(index=False))
-    best = grid.sort_values(["roc_auc", "brier"], ascending=[False, True]).iloc[0]
-    C, cw = float(best["C"]), (None if best["class_weight"] == "None" else "balanced")
-    print(f"\nelegido: C={C}, class_weight={cw}")
+    print(grid.sort_values("brier").round(4).to_string(index=False))
+    best = grid.sort_values(["brier", "roc_auc"], ascending=[True, False]).iloc[0]
+    C = float(best["C"])
+    half_life = None if pd.isna(best["half_life"]) else float(best["half_life"])
+    print(f"\nelegido: C={C}, vida media={half_life} años "
+          f"(pobreza real en validación: {valid[TARGET].mean():.3f})")
 
     # 2) Decision threshold: balanced accuracy, because with 60% of households poor
     #    F1 rewards calling everyone poor.
-    model = build(C, cw).fit(train[FEATURES], train[TARGET])
-    p_valid = model.predict_proba(valid[FEATURES])[:, 1]
+    p_valid = oof[(half_life, C)]
     grid_t = np.round(np.arange(0.30, 0.801, 0.01), 2)
     threshold = float(grid_t[np.argmax(
         [balanced_accuracy_score(valid[TARGET], p_valid >= t) for t in grid_t])])
     print(f"umbral elegido en validación: {threshold:.2f}")
-    print("validación @0.50:", {k: round(v, 3) for k, v in metrics(valid[TARGET], p_valid, 0.5).items()})
-    print(f"validación @{threshold:.2f}:", {k: round(v, 3) for k, v in metrics(valid[TARGET], p_valid, threshold).items()})
+    valid_metrics = metrics(valid[TARGET], p_valid, threshold)
+    print(f"validación @{threshold:.2f}:", {k: round(v, 3) for k, v in valid_metrics.items()})
 
-    # 3) Refit on train + valid and look at 2025 once.
-    fit_tv = pd.concat([train, valid])
-    model = build(C, cw).fit(fit_tv[FEATURES], fit_tv[TARGET])
+    # 3) Refit on train + valid and report on 2025.
+    model = fit(fit_tv, TEST_YEARS[0], C, half_life)
     p_test = model.predict_proba(test[FEATURES])[:, 1]
     test_metrics = metrics(test[TARGET], p_test, threshold)
     print(f"\nTEST {TEST_YEARS} @{threshold:.2f}:", {k: round(v, 3) for k, v in test_metrics.items()})
@@ -114,8 +147,8 @@ def main():
     print("\ncalibración en test (deciles de probabilidad):")
     print(cal.groupby("bin").agg(predicho=("p", "mean"), observado=("y", "mean"), n=("y", "size")).round(3).to_string())
 
-    # 4) Final model on every labelled year, with readable coefficients.
-    final = build(C, cw).fit(h[FEATURES], h[TARGET])
+    # 4) Final model on every labelled year, weighted towards the next survey.
+    final = fit(h, int(h["anio"].max()) + 1, C, half_life)
     names = [n.split("__", 1)[1] for n in final.named_steps["prep"].get_feature_names_out()]
     coef = pd.Series(final.named_steps["clf"].coef_[0], index=names)
     odds = np.exp(coef).sort_values()
@@ -138,9 +171,11 @@ def main():
     print(f"\nONNX vs sklearn: dif. máxima de probabilidad {np.abs(p_onnx - p_skl).max():.2e}")
 
     (MODELS / "poverty_logreg.json").write_text(json.dumps({
-        "features": FEATURES, "C": C, "class_weight": cw, "threshold": threshold,
+        "features": FEATURES, "C": C, "half_life_years": half_life, "threshold": threshold,
         "train_years": TRAIN_YEARS, "valid_years": VALID_YEARS, "test_years": TEST_YEARS,
+        "valid": {k: round(float(v), 4) for k, v in valid_metrics.items()},
         "test": {k: round(float(v), 4) for k, v in test_metrics.items()},
+        "test_poverty_rate": round(float(test[TARGET].mean()), 4),
         "odds_ratios": {k: round(float(v), 4) for k, v in odds.items()},
     }, ensure_ascii=False, indent=1), encoding="utf-8")
     print("exportado models/poverty_logreg.onnx y .json")
