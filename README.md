@@ -1,6 +1,11 @@
 # EPHPM Honduras: indicadores por departamento y año
 
-Procesa las bases de la Encuesta Permanente de Hogares de Propósitos Múltiples (INE Honduras), arma un panel de indicadores por departamento y año, entrena un modelo que asigna un nivel de condiciones de vida y lo sirve con una API FastAPI. El dashboard vive en el repo `frontend-EPHPM-2025`.
+Procesa las bases de la Encuesta Permanente de Hogares de Propósitos Múltiples (INE Honduras), arma un panel de indicadores por departamento y año, entrena un modelo que asigna un nivel de condiciones de vida y lo sirve con una API FastAPI.
+
+| | Repo | Producción |
+|---|---|---|
+| API y pipeline | este | <https://base-ephpm-julio-2025.vercel.app> |
+| Dashboard | [frontend-EPHPM-2025](https://github.com/Franklin-Amador/frontend-EPHPM-2025) | <https://frontend-ephpm-2025.vercel.app> |
 
 ## Datos
 
@@ -12,6 +17,9 @@ Fuente: <https://ine.gob.hn/bases-de-datos/>. Las bases no se versionan; se desc
 | 2021, 2022 | Sin pobreza; el ingreso del hogar se deriva sumando el de sus miembros |
 | 2001–2006 | Fuera: no traen ingreso del hogar comparable |
 | 2012–2017, 2020 | El INE no publica microdatos descargables |
+| 2026 | Pendiente: al 23 de noviembre de 2026 el INE solo ha publicado cuadros resumen, no la base de microdatos |
+
+La pobreza y la pobreza extrema nacionales que calcula el ETL coinciden con la serie oficial del INE (`Cuadros-de-Pobreza-2026.xlsx`, hoja `Cuadro03`): diferencia de 0.00 puntos en 2007–2011, 2018, 2019 y 2025, y de 0.04 como máximo en 2023 y 2024.
 
 Particularidades que el ETL resuelve (`config/variables.yml`):
 
@@ -33,7 +41,11 @@ python src/clustering.py fit --set nucleo --k 3  # models/clustering_panel.onnx 
 python src/export_panel.py --front "../EPHPM Front/frontend-EPHPM-2025"
 python src/poverty_model.py                      # baseline supervisado de pobreza por hogar
 PYTHONPATH=src python src/poverty_logreg.py      # regresión logística de pobreza: ajuste, prueba y ONNX
+python src/export_panel.py --front "../EPHPM Front/frontend-EPHPM-2025"   # otra vez: el panel lleva el resumen del modelo de pobreza
+python src/upload_blob.py upload                 # publica los artefactos (ver "Publicar")
 ```
+
+`export_panel.py` lee `models/poverty_logreg.json`, así que hay que volver a ejecutarlo después de reentrenar el modelo de pobreza.
 
 ## Modelo de niveles
 
@@ -51,7 +63,7 @@ Los tres artefactos se cargan en memoria desde Vercel Blob al arrancar:
 | `MODEL_META_BLOB_URL` | `models/clustering_panel.json` |
 | `PANEL_BLOB_URL` | `api_data/panel.json` |
 
-Si falta alguna, la API usa esos archivos locales (solo desarrollo; no están en git). Tras reentrenar o regenerar el panel hay que subir los tres archivos al Blob.
+Si falta alguna, la API usa esos archivos locales (solo desarrollo; no están en git). El modelo de pobreza también se sube al Blob (`POVERTY_MODEL_BLOB_URL`, `POVERTY_META_BLOB_URL`), pero la API todavía no lo sirve.
 
 ```bash
 uvicorn main_onnx:app --reload
@@ -97,3 +109,26 @@ PYTHONPATH=src python src/poverty_logreg.py    # ajuste, prueba y models/poverty
 ```
 
 El ONNX recibe una entrada por variable (ver `models/poverty_logreg.json`) y, como los demás artefactos, no se versiona en git.
+
+## El panel y el dashboard
+
+`api_data/panel.json` es el único archivo que consumen la API y el dashboard. Además de los indicadores y los niveles lleva, en `poverty_model`:
+
+- las métricas de prueba del modelo de pobreza y los años de cada paso;
+- `factors`: para cada tipo de hogar (nadie trabaja, 6 personas o más, zona rural…), cuántos eran pobres en el último año con dato de pobreza, ponderado con el factor de expansión. Son tasas observadas en la encuesta, no coeficientes del modelo. Los grupos se definen en `POVERTY_FACTORS` de `src/export_panel.py`.
+
+El dashboard importa una copia del panel (`lib/panel.json`), no lo pide a la API; por eso `export_panel.py --front` la escribe en su carpeta y hay que desplegarlo aparte.
+
+## Publicar
+
+1. `python src/upload_blob.py upload` sube los cinco artefactos a `ephpm/v3/` en Vercel Blob (necesita `BLOB_READ_WRITE_TOKEN` en `.env`) y comprueba que lo publicado coincide con lo local. Las URL no cambian, así que no hay que tocar las variables de Vercel.
+2. La API lee los artefactos al arrancar. `GET /info` devuelve la fecha `generated` del panel que está sirviendo.
+3. En el repo del dashboard, hacer commit de `lib/panel.json` y subirlo a `main`: Vercel lo despliega.
+
+## Cuando salga la EPHPM 2026
+
+1. Descargar el zip de <https://ine.gob.hn/bases-de-datos/> a `data/raw/2026/` y anotarlo en `data/raw/MANIFEST.md`.
+2. Añadir la línea de 2026 en `years` de `config/variables.yml`; `python src/inventory.py` muestra qué variables trae la base.
+3. Ejecutar el pipeline completo.
+4. Comprobar la pobreza nacional contra los cuadros oficiales que ya están en `data/raw/2026/`: 61.06 % de hogares pobres y 39.72 % en pobreza extrema.
+5. 2026 será la primera prueba independiente del modelo de pobreza: evaluarlo ahí antes de reentrenar con ese año.
